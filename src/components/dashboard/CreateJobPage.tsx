@@ -489,7 +489,12 @@ const CreateJobPage = () => {
         jobData.recurrence_pattern = null;
       }
 
-      console.log('🔵 Creating job:', jobData);
+      console.log('🔵 Creating job with detailed data:');
+      console.log('📋 Full jobData object:', JSON.stringify(jobData, null, 2));
+      console.log('🔄 Is recurring:', jobData.is_recurring);
+      console.log('📅 Recurrence pattern:', JSON.stringify(jobData.recurrence_pattern, null, 2));
+      console.log('👤 User ID:', user.id);
+      console.log('🏢 Business ID:', profile.business_id);
 
       const { data, error: insertError } = await supabase
         .from('jobs')
@@ -498,7 +503,13 @@ const CreateJobPage = () => {
         .single();
 
       if (insertError) {
-        console.error('🔴 Error creating job:', insertError);
+        console.error('🔴 Detailed error creating job:');
+        console.error('❌ Error object:', JSON.stringify(insertError, null, 2));
+        console.error('💾 Data that failed:', JSON.stringify(jobData, null, 2));
+        console.error('📝 Error message:', insertError.message);
+        console.error('🔍 Error details:', insertError.details);
+        console.error('💡 Error hint:', insertError.hint);
+        console.error('🏷️ Error code:', insertError.code);
         throw insertError;
       }
 
