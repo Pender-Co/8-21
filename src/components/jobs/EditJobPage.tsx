@@ -357,143 +357,139 @@ const EditJobPage = () => {
     return errors;
   };
 
-  const handleSave = async () => {
-    if (!job || !user || !profile?.business_id) {
-      setError('Unable to save job. Please try again.');
-      return;
-    }
+const handleSave = async () => {
+  if (!job || !user || !profile?.business_id) {
+    setError('Unable to save job. Please try again.');
+    return;
+  }
 
-    const validationErrors = validateForm();
-    if (validationErrors.length > 0) {
-      setError(validationErrors.join(', '));
-      return;
-    }
+  const validationErrors = validateForm();
+  if (validationErrors.length > 0) {
+    setError(validationErrors.join(', '));
+    return;
+  }
 
-    setSaving(true);
-    setError('');
+  setSaving(true);
+  setError('');
 
-    try {
-      // Upload new files to Supabase Storage
-      const finalAttachments = [];
-      
-      for (const file of formData.attachedFiles) {
-        if (file.rawFile) {
-          // This is a new file that needs to be uploaded
-          try {
-            // Generate unique file path
-            const fileExt = file.name.split('.').pop();
-            const fileName = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}.${fileExt}`;
-            const filePath = `jobs/${fileName}`;
+  try {
+    // Upload files (unchanged)
+    const finalAttachments = [];
+    for (const file of formData.attachedFiles) {
+      if (file.rawFile) {
+        try {
+          const fileExt = file.name.split('.').pop();
+          const fileName = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}.${fileExt}`;
+          const filePath = `jobs/${fileName}`;
 
-            console.log('🔵 Uploading file to Supabase Storage:', filePath);
+          const { error: uploadError } = await supabase.storage
+            .from('job-attachments')
+            .upload(filePath, file.rawFile);
+          if (uploadError) throw uploadError;
 
-            // Upload to Supabase Storage
-            const { error: uploadError } = await supabase.storage
-              .from('job-attachments')
-              .upload(filePath, file.rawFile);
+          const { data: { publicUrl } } = supabase.storage
+            .from('job-attachments')
+            .getPublicUrl(filePath);
 
-            if (uploadError) {
-              console.error('🔴 File upload error:', uploadError);
-              throw new Error(`Failed to upload ${file.name}: ${uploadError.message}`);
-            }
-
-            // Get public URL
-            const { data: { publicUrl } } = supabase.storage
-              .from('job-attachments')
-              .getPublicUrl(filePath);
-
-            console.log('🟢 File uploaded successfully:', publicUrl);
-
-            // Add to final attachments
-            finalAttachments.push({
-              id: file.id,
-              name: file.name,
-              size: file.size,
-              type: file.type,
-              url: publicUrl,
-              uploadedAt: file.uploadedAt.toISOString()
-            });
-          } catch (uploadError) {
-            console.error('🔴 Error uploading file:', uploadError);
-            setError(`Failed to upload ${file.name}. Please try again.`);
-            setSaving(false);
-            return;
-          }
-        } else if (file.supabaseUrl) {
-          // This is an existing file that was already uploaded
           finalAttachments.push({
             id: file.id,
             name: file.name,
             size: file.size,
             type: file.type,
-            url: file.supabaseUrl,
+            url: publicUrl,
             uploadedAt: file.uploadedAt.toISOString()
           });
+        } catch (uploadError) {
+          console.error('🔴 Error uploading file:', uploadError);
+          setError(`Failed to upload ${file.name}. Please try again.`);
+          setSaving(false);
+          return;
         }
+      } else if (file.supabaseUrl) {
+        finalAttachments.push({
+          id: file.id,
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          url: file.supabaseUrl,
+          uploadedAt: file.uploadedAt.toISOString()
+        });
       }
-
-      // Calculate estimated cost from service items
-      const estimatedCost = formData.serviceItems.reduce((sum, item) => sum + item.total, 0);
-      
-      const jobUpdates = {
-        title: formData.title.trim(),
-        description: formData.description.trim(),
-        priority: formData.priority,
-        estimated_duration: formData.estimatedDuration,
-        estimated_cost: estimatedCost,
-        notes: formData.internalNotes.trim() || null,
-        scheduled_date: formData.startDate || null,
-        scheduled_time: formData.startTime || null,
-        attachments: finalAttachments
-      };
-
-      console.log('🔵 Updating job:', jobUpdates);
-
-      // Update job
-      await updateJob(job.id, jobUpdates);
-
-      // Update service items if they changed
-      if (formData.serviceItems.length > 0) {
-        // Delete existing service items
-        await supabase
-          .from('job_service_items')
-          .delete()
-          .eq('job_id', job.id);
-
-        // Insert new service items
-        const serviceItemsData = formData.serviceItems.map((item, index) => ({
-          job_id: job.id,
-          business_id: profile.business_id,
-          item_name: item.itemName.trim(),
-          quantity: item.quantity,
-          unit_cost: item.unitCost,
-          unit_price: item.unitPrice,
-          description: item.description.trim() || null,
-          sort_order: index
-        }));
-
-        const { error: serviceItemsError } = await supabase
-          .from('job_service_items')
-          .insert(serviceItemsData);
-
-        if (serviceItemsError) throw serviceItemsError;
-      }
-
-      console.log('🟢 Job updated successfully');
-      
-      // Clear unsaved changes flag
-      setHasUnsavedChanges(false);
-      
-      // Navigate back to jobs page
-      navigate('/jobs');
-
-    } catch (error: any) {
-      console.error('🔴 Error updating job:', error);
-      setError(error.message || 'Failed to update job. Please try again.');
-    } finally {
-      setSaving(false);
     }
-  };
+
+    // NEW: compute recurrence bits from your form
+    const isRecurring = formData.jobType === 'recurring';
+    let recurrence_pattern = null;
+    try {
+      recurrence_pattern = buildRecurrencePattern(formData);
+    } catch (e: any) {
+      // If user marked recurring but fields incomplete, show a friendly error
+      setError(e.message || 'Please complete recurring schedule details.');
+      setSaving(false);
+      return;
+    }
+
+    // Estimate cost from service items (unchanged)
+    const estimatedCost = formData.serviceItems.reduce((sum, item) => sum + item.total, 0);
+
+    // NEW: include is_recurring / recurrence_pattern (+ HH:mm:ss)
+    const jobUpdates: any = {
+      title: formData.title.trim(),
+      description: formData.description.trim(),
+      priority: formData.priority,
+      estimated_duration: formData.estimatedDuration,
+      estimated_cost: estimatedCost,
+      notes: formData.internalNotes.trim() || null,
+      scheduled_date: formData.startDate || null,
+      scheduled_time: ensureHHMMSS(formData.startTime), // normalize
+      attachments: finalAttachments,
+      is_recurring: isRecurring,
+      // Important for template rows: parent_job_id must be null
+      parent_job_id: isRecurring ? null : job.parent_job_id ?? null,
+      recurrence_pattern: isRecurring ? recurrence_pattern : null,
+    };
+
+    console.log('🔵 Updating job (will trigger recurrence if applicable):', jobUpdates);
+
+    // IMPORTANT: Make sure your update actually sends these columns.
+    // If your `updateJob` hook whitelists fields and strips extras, call Supabase directly:
+    const { error: updError } = await supabase
+      .from('jobs')
+      .update(jobUpdates)
+      .eq('id', job.id);
+
+    if (updError) throw updError;
+
+    // Update service items if they changed (unchanged)
+    if (formData.serviceItems.length > 0) {
+      await supabase.from('job_service_items').delete().eq('job_id', job.id);
+
+      const serviceItemsData = formData.serviceItems.map((item, index) => ({
+        job_id: job.id,
+        business_id: profile.business_id,
+        item_name: item.itemName.trim(),
+        quantity: item.quantity,
+        unit_cost: item.unitCost,
+        unit_price: item.unitPrice,
+        description: item.description.trim() || null,
+        sort_order: index
+      }));
+
+      const { error: serviceItemsError } = await supabase.from('job_service_items').insert(serviceItemsData);
+      if (serviceItemsError) throw serviceItemsError;
+    }
+
+    console.log('🟢 Job updated successfully (recurrence generator will run if is_recurring=true)');
+    setHasUnsavedChanges(false);
+    navigate('/jobs');
+
+  } catch (error: any) {
+    console.error('🔴 Error updating job:', error);
+    setError(error.message || 'Failed to update job. Please try again.');
+  } finally {
+    setSaving(false);
+  }
+};
 
   const handleBackClick = () => {
     if (hasUnsavedChanges) {
