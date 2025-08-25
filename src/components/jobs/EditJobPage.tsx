@@ -1,12 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { 
-  ArrowLeft, 
-  Save, 
-  FileText,
-  AlertCircle,
-  X
-} from 'lucide-react';
+import { ArrowLeft, Save, FileText, AlertCircle, X } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useJobs, Job } from '../../hooks/useJobs';
 import { supabase } from '../../lib/supabase';
@@ -14,76 +8,9 @@ import SchedulingSection from '../dashboard/SchedulingSection';
 import ServiceItemsSection from '../dashboard/ServiceItemsSection';
 import InternalNotesSection from '../dashboard/InternalNotesSection';
 
-
-
-// === Recurrence helpers (inline for now) ===
-const weekdayToNum: Record<string, number> = {
-  Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6,
-};
-
-function ensureHHMMSS(t: string) {
-  if (!t) return null;
-  return t.length === 5 ? `${t}:00` : t; // "09:00" -> "09:00:00"
-}
-
-function addPeriod(start: string, kind: 'weeks'|'months'|'years', amount: number): string {
-  const d = new Date(`${start}T00:00:00`);
-  if (kind === 'weeks') d.setDate(d.getDate() + amount * 7);
-  if (kind === 'months') d.setMonth(d.getMonth() + amount);
-  if (kind === 'years') d.setFullYear(d.getFullYear() + amount);
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${d.getFullYear()}-${mm}-${dd}`;
-}
-
-/**
- * Map your formData into the JSON `recurrence_pattern` your SQL expects.
- * Supports your current fields: jobType, repeatType, duration(+Unit), weeklyDay, monthlyDate, startDate.
- */
-function buildRecurrencePattern(formData: EditJobFormData) {
-  if (formData.jobType !== 'recurring') return null;
-
-  const start_date = formData.startDate;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(start_date)) {
-    throw new Error('Start date is required for recurring jobs.');
-  }
-
-  // Duration -> end_date
-  let end_date: string | null = null;
-  const { duration, durationUnit } = formData; // 1 + 'weeks' | 'months' | 'years'
-  if (duration && durationUnit) {
-    end_date = addPeriod(start_date, durationUnit === 'days' ? 'weeks' : (durationUnit as any), durationUnit === 'days' ? Math.ceil(duration/7) : duration);
-  }
-
-  const base: any = {
-    interval: 1,
-    start_date,
-    end_date,
-    tz: 'America/Denver', // or read from profile
-  };
-
-  // Map repeatType to freq + specifics
-  if (formData.repeatType === 'weekly') {
-    base.freq = 'weekly';
-    // Your form has a single `weeklyDay` string like "Monday"
-    const dayNum = weekdayToNum[formData.weeklyDay] ?? 1; // default Monday
-    base.byweekday = [dayNum];
-  } else if (formData.repeatType === 'monthly') {
-    base.freq = 'monthly';
-    base.bymonthday = formData.monthlyDate || 1;
-  } else if (formData.repeatType === 'as-needed') {
-    // No real recurrence rule → treat as one-off
-    return null;
-  } else {
-    // 'custom' not yet modeled → you can extend later
-    base.freq = 'weekly';
-    base.byweekday = [weekdayToNum['Monday']];
-  }
-
-  return base;
-}
-
-
+/* =========================
+   Interfaces / Types
+   ========================= */
 interface ServiceItem {
   id: string;
   itemName: string;
@@ -112,15 +39,15 @@ interface EditJobFormData {
   clientId: string;
   selectedAddress: any | null;
   jobType: 'one-off' | 'recurring';
-  startDate: string;
-  endDate: string;
-  startTime: string;
-  endTime: string;
-  duration: number;
+  startDate: string;       // YYYY-MM-DD
+  endDate: string;         // (unused for now, but kept)
+  startTime: string;       // HH:mm or HH:mm:ss
+  endTime: string;         // (unused for now, but kept)
+  duration: number;        // used to compute end_date
   durationUnit: 'days' | 'weeks' | 'months' | 'years';
   repeatType: 'as-needed' | 'weekly' | 'monthly' | 'custom';
-  weeklyDay: string;
-  monthlyDate: number;
+  weeklyDay: string;       // e.g., 'Monday'
+  monthlyDate: number;     // 1..31
   scheduleNow: boolean;
   remindToInvoice: boolean;
   billingMethod: 'per-visit' | 'fixed-price';
@@ -133,12 +60,99 @@ interface EditJobFormData {
   estimatedDuration: number;
 }
 
+/* =========================
+   Recurrence Helpers
+   ========================= */
+const weekdayToNum: Record<string, number> = {
+  Sunday: 0,
+  Monday: 1,
+  Tuesday: 2,
+  Wednesday: 3,
+  Thursday: 4,
+  Friday: 5,
+  Saturday: 6,
+};
+
+function ensureHHMMSS(t: string) {
+  if (!t) return null;
+  return t.length === 5 ? `${t}:00` : t; // "09:00" -> "09:00:00"
+}
+
+function addPeriod(start: string, kind: 'weeks' | 'months' | 'years', amount: number): string {
+  const d = new Date(`${start}T00:00:00`);
+  if (kind === 'weeks') d.setDate(d.getDate() + amount * 7);
+  if (kind === 'months') d.setMonth(d.getMonth() + amount);
+  if (kind === 'years') d.setFullYear(d.getFullYear() + amount);
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+/**
+ * Map your formData into the JSON `recurrence_pattern` your SQL expects.
+ * Supports your current fields: jobType, repeatType, duration(+Unit), weeklyDay, monthlyDate, startDate.
+ */
+function buildRecurrencePattern(formData: EditJobFormData) {
+  if (formData.jobType !== 'recurring') return null;
+
+  const start_date = formData.startDate;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start_date)) {
+    throw new Error('Start date is required for recurring jobs.');
+  }
+
+  // Compute end_date from (duration, durationUnit)
+  let end_date: string | null = null;
+  const { duration, durationUnit } = formData;
+  if (duration && durationUnit) {
+    if (durationUnit === 'days') {
+      // direct add days (optional: convert to weeks like earlier)
+      const d = new Date(`${start_date}T00:00:00`);
+      d.setDate(d.getDate() + duration);
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      end_date = `${d.getFullYear()}-${mm}-${dd}`;
+    } else {
+      end_date = addPeriod(start_date, durationUnit as 'weeks' | 'months' | 'years', duration);
+    }
+  }
+
+  const base: any = {
+    interval: 1,
+    start_date,
+    end_date,
+    tz: 'America/Denver', // adjust if you store user tz
+  };
+
+  // Map repeatType to freq + specifics
+  if (formData.repeatType === 'weekly') {
+    base.freq = 'weekly';
+    // UI provides single weeklyDay (e.g., "Monday")
+    const dayNum = weekdayToNum[formData.weeklyDay] ?? 1; // default Monday
+    base.byweekday = [dayNum];
+  } else if (formData.repeatType === 'monthly') {
+    base.freq = 'monthly';
+    base.bymonthday = formData.monthlyDate || 1;
+  } else if (formData.repeatType === 'as-needed') {
+    // No recurrence rule
+    return null;
+  } else {
+    // 'custom' not modeled yet -> default to weekly Monday
+    base.freq = 'weekly';
+    base.byweekday = [weekdayToNum['Monday']];
+  }
+
+  return base;
+}
+
+/* =========================
+   Component
+   ========================= */
 const EditJobPage = () => {
   const { jobId } = useParams<{ jobId: string }>();
   const navigate = useNavigate();
   const { user, profile } = useAuth();
-  const { jobs, updateJob } = useJobs();
-  
+  const { jobs } = useJobs(); // keep jobs for initial load path
+
   const [job, setJob] = useState<Job | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -171,7 +185,7 @@ const EditJobPage = () => {
     internalNotes: '',
     attachedFiles: [],
     priority: 'medium',
-    estimatedDuration: 0
+    estimatedDuration: 0,
   });
 
   // Load job data
@@ -184,9 +198,9 @@ const EditJobPage = () => {
 
       try {
         setLoading(true);
-        
-        // Find job in the jobs array first
-        const existingJob = jobs.find(j => j.id === jobId);
+
+        // First check in-memory jobs
+        const existingJob = jobs.find((j) => j.id === jobId);
         if (existingJob) {
           setJob(existingJob);
           populateFormData(existingJob);
@@ -194,10 +208,11 @@ const EditJobPage = () => {
           return;
         }
 
-        // If not found in array, fetch from database
+        // Else fetch from DB
         const { data, error } = await supabase
           .from('jobs')
-          .select(`
+          .select(
+            `
             *,
             clients (
               first_name,
@@ -220,7 +235,8 @@ const EditJobPage = () => {
               total,
               sort_order
             )
-          `)
+          `
+          )
           .eq('id', jobId)
           .single();
 
@@ -230,8 +246,8 @@ const EditJobPage = () => {
           return;
         }
 
-        setJob(data);
-        populateFormData(data);
+        setJob(data as any);
+        populateFormData(data as any);
       } catch (err: any) {
         console.error('Error loading job:', err);
         setError(err.message || 'Failed to load job');
@@ -245,7 +261,7 @@ const EditJobPage = () => {
 
   const populateFormData = (jobData: Job) => {
     // Convert service items to form format
-    const serviceItems: ServiceItem[] = (jobData.job_service_items || []).map(item => ({
+    const serviceItems: ServiceItem[] = (jobData.job_service_items || []).map((item) => ({
       id: item.id,
       itemName: item.item_name,
       quantity: item.quantity,
@@ -253,25 +269,27 @@ const EditJobPage = () => {
       unitPrice: item.unit_price,
       description: item.description || '',
       total: item.total,
-      sortOrder: item.sort_order
+      sortOrder: item.sort_order,
     }));
 
     // Convert existing attachments to form format
-    const attachedFiles: UploadedFile[] = (jobData.attachments || []).map(attachment => ({
-      id: attachment.id || `existing-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    const attachedFiles: UploadedFile[] = (jobData.attachments || []).map((attachment: any) => ({
+      id:
+        attachment.id ||
+        `existing-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       name: attachment.name,
       size: attachment.size,
       type: attachment.type,
-      localUrl: attachment.url, // Use existing URL for preview
-      supabaseUrl: attachment.url, // Mark as already uploaded
-      uploadedAt: new Date(attachment.uploadedAt || Date.now())
+      localUrl: attachment.url,
+      supabaseUrl: attachment.url,
+      uploadedAt: new Date(attachment.uploadedAt || Date.now()),
     }));
 
     setFormData({
       title: jobData.title,
       description: jobData.description || '',
       clientId: jobData.client_id,
-      selectedAddress: null, // Will be loaded separately if needed
+      selectedAddress: null, // load separately if needed
       jobType: jobData.is_recurring ? 'recurring' : 'one-off',
       startDate: jobData.scheduled_date || '',
       endDate: jobData.scheduled_date || '',
@@ -291,26 +309,26 @@ const EditJobPage = () => {
       internalNotes: jobData.notes || '',
       attachedFiles,
       priority: jobData.priority,
-      estimatedDuration: jobData.estimated_duration
+      estimatedDuration: jobData.estimated_duration,
     });
   };
 
   // Track form changes
   useEffect(() => {
     if (!job) return;
-    
-    const hasChanges = 
+
+    const hasChanges =
       formData.title !== job.title ||
       formData.description !== (job.description || '') ||
       formData.priority !== job.priority ||
       formData.estimatedDuration !== job.estimated_duration ||
       formData.internalNotes !== (job.notes || '') ||
       formData.serviceItems.length !== (job.job_service_items?.length || 0);
-    
+
     setHasUnsavedChanges(hasChanges);
   }, [formData, job]);
 
-  // Handle navigation warnings
+  // Navigation warning
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (hasUnsavedChanges) {
@@ -318,178 +336,171 @@ const EditJobPage = () => {
         e.returnValue = '';
       }
     };
-
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [hasUnsavedChanges]);
 
   const handleInputChange = (field: keyof EditJobFormData, value: any) => {
-    setFormData(prev => ({ ...prev, [field]: value }));
+    setFormData((prev) => ({ ...prev, [field]: value }));
   };
 
   const handleSchedulingChange = (field: string, value: any) => {
-    setFormData(prev => ({ ...prev, [field]: value }));
+    setFormData((prev) => ({ ...prev, [field]: value }));
   };
 
   const handleServiceItemsChange = (items: ServiceItem[]) => {
-    setFormData(prev => ({ ...prev, serviceItems: items }));
+    setFormData((prev) => ({ ...prev, serviceItems: items }));
   };
 
   const handleInternalNotesChange = (notes: string) => {
-    setFormData(prev => ({ ...prev, internalNotes: notes }));
+    setFormData((prev) => ({ ...prev, internalNotes: notes }));
   };
 
   const handleAttachedFilesChange = (files: UploadedFile[]) => {
-    setFormData(prev => ({ ...prev, attachedFiles: files }));
+    setFormData((prev) => ({ ...prev, attachedFiles: files }));
   };
 
   const validateForm = () => {
-    const errors = [];
-    
-    if (!formData.title.trim()) {
-      errors.push('Job title is required');
-    }
-    
-    if (!formData.description.trim()) {
-      errors.push('Job description is required');
-    }
-    
+    const errors: string[] = [];
+    if (!formData.title.trim()) errors.push('Job title is required');
+    if (!formData.description.trim()) errors.push('Job description is required');
     return errors;
   };
 
-const handleSave = async () => {
-  if (!job || !user || !profile?.business_id) {
-    setError('Unable to save job. Please try again.');
-    return;
-  }
+  const handleSave = async () => {
+    if (!job || !user || !profile?.business_id) {
+      setError('Unable to save job. Please try again.');
+      return;
+    }
 
-  const validationErrors = validateForm();
-  if (validationErrors.length > 0) {
-    setError(validationErrors.join(', '));
-    return;
-  }
+    const validationErrors = validateForm();
+    if (validationErrors.length > 0) {
+      setError(validationErrors.join(', '));
+      return;
+    }
 
-  setSaving(true);
-  setError('');
+    setSaving(true);
+    setError('');
 
-  try {
-    // Upload files (unchanged)
-    const finalAttachments = [];
-    for (const file of formData.attachedFiles) {
-      if (file.rawFile) {
-        try {
-          const fileExt = file.name.split('.').pop();
-          const fileName = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}.${fileExt}`;
-          const filePath = `jobs/${fileName}`;
+    try {
+      // Upload new files to Supabase Storage
+      const finalAttachments: any[] = [];
+      for (const file of formData.attachedFiles) {
+        if (file.rawFile) {
+          try {
+            const fileExt = file.name.split('.').pop();
+            const fileName = `${Date.now()}-${Math.random()
+              .toString(36)
+              .substr(2, 9)}.${fileExt}`;
+            const filePath = `jobs/${fileName}`;
 
-          const { error: uploadError } = await supabase.storage
-            .from('job-attachments')
-            .upload(filePath, file.rawFile);
-          if (uploadError) throw uploadError;
+            const { error: uploadError } = await supabase.storage
+              .from('job-attachments')
+              .upload(filePath, file.rawFile);
+            if (uploadError) throw uploadError;
 
-          const { data: { publicUrl } } = supabase.storage
-            .from('job-attachments')
-            .getPublicUrl(filePath);
+            const {
+              data: { publicUrl },
+            } = supabase.storage.from('job-attachments').getPublicUrl(filePath);
 
+            finalAttachments.push({
+              id: file.id,
+              name: file.name,
+              size: file.size,
+              type: file.type,
+              url: publicUrl,
+              uploadedAt: file.uploadedAt.toISOString(),
+            });
+          } catch (uploadError: any) {
+            console.error('🔴 Error uploading file:', uploadError);
+            setError(`Failed to upload ${file.name}. Please try again.`);
+            setSaving(false);
+            return;
+          }
+        } else if (file.supabaseUrl) {
           finalAttachments.push({
             id: file.id,
             name: file.name,
             size: file.size,
             type: file.type,
-            url: publicUrl,
-            uploadedAt: file.uploadedAt.toISOString()
+            url: file.supabaseUrl,
+            uploadedAt: file.uploadedAt.toISOString(),
           });
-        } catch (uploadError) {
-          console.error('🔴 Error uploading file:', uploadError);
-          setError(`Failed to upload ${file.name}. Please try again.`);
+        }
+      }
+
+      // Recurrence bits
+      const isRecurring = formData.jobType === 'recurring';
+      let recurrence_pattern: any = null;
+      try {
+        recurrence_pattern = buildRecurrencePattern(formData);
+      } catch (e: any) {
+        if (isRecurring) {
+          setError(e.message || 'Please complete recurring schedule details.');
           setSaving(false);
           return;
         }
-      } else if (file.supabaseUrl) {
-        finalAttachments.push({
-          id: file.id,
-          name: file.name,
-          size: file.size,
-          type: file.type,
-          url: file.supabaseUrl,
-          uploadedAt: file.uploadedAt.toISOString()
-        });
       }
-    }
 
-    // NEW: compute recurrence bits from your form
-    const isRecurring = formData.jobType === 'recurring';
-    let recurrence_pattern = null;
-    try {
-      recurrence_pattern = buildRecurrencePattern(formData);
-    } catch (e: any) {
-      // If user marked recurring but fields incomplete, show a friendly error
-      setError(e.message || 'Please complete recurring schedule details.');
+      // Cost from service items
+      const estimatedCost = formData.serviceItems.reduce(
+        (sum, item) => sum + item.total,
+        0
+      );
+
+      // Job update payload
+      const jobUpdates: any = {
+        title: formData.title.trim(),
+        description: formData.description.trim(),
+        priority: formData.priority,
+        estimated_duration: formData.estimatedDuration,
+        estimated_cost: estimatedCost,
+        notes: formData.internalNotes.trim() || null,
+        scheduled_date: formData.startDate || null,
+        scheduled_time: ensureHHMMSS(formData.startTime),
+        attachments: finalAttachments,
+        is_recurring: isRecurring,
+        parent_job_id: isRecurring ? null : job.parent_job_id ?? null,
+        recurrence_pattern: isRecurring ? recurrence_pattern : null,
+      };
+
+      console.log('🔵 Updating job (will trigger recurrence if applicable):', jobUpdates);
+
+      // Update job directly to ensure fields are sent
+      const { error: updError } = await supabase.from('jobs').update(jobUpdates).eq('id', job.id);
+      if (updError) throw updError;
+
+      // Update service items
+      if (formData.serviceItems.length > 0) {
+        await supabase.from('job_service_items').delete().eq('job_id', job.id);
+
+        const serviceItemsData = formData.serviceItems.map((item, index) => ({
+          job_id: job.id,
+          business_id: profile.business_id,
+          item_name: item.itemName.trim(),
+          quantity: item.quantity,
+          unit_cost: item.unitCost,
+          unit_price: item.unitPrice,
+          description: item.description.trim() || null,
+          sort_order: index,
+        }));
+
+        const { error: serviceItemsError } = await supabase
+          .from('job_service_items')
+          .insert(serviceItemsData);
+        if (serviceItemsError) throw serviceItemsError;
+      }
+
+      console.log('🟢 Job updated successfully (recurrence generator should run)');
+      setHasUnsavedChanges(false);
+      navigate('/jobs');
+    } catch (error: any) {
+      console.error('🔴 Error updating job:', error);
+      setError(error.message || 'Failed to update job. Please try again.');
+    } finally {
       setSaving(false);
-      return;
     }
-
-    // Estimate cost from service items (unchanged)
-    const estimatedCost = formData.serviceItems.reduce((sum, item) => sum + item.total, 0);
-
-    // NEW: include is_recurring / recurrence_pattern (+ HH:mm:ss)
-    const jobUpdates: any = {
-      title: formData.title.trim(),
-      description: formData.description.trim(),
-      priority: formData.priority,
-      estimated_duration: formData.estimatedDuration,
-      estimated_cost: estimatedCost,
-      notes: formData.internalNotes.trim() || null,
-      scheduled_date: formData.startDate || null,
-      scheduled_time: ensureHHMMSS(formData.startTime), // normalize
-      attachments: finalAttachments,
-      is_recurring: isRecurring,
-      // Important for template rows: parent_job_id must be null
-      parent_job_id: isRecurring ? null : job.parent_job_id ?? null,
-      recurrence_pattern: isRecurring ? recurrence_pattern : null,
-    };
-
-    console.log('🔵 Updating job (will trigger recurrence if applicable):', jobUpdates);
-
-    // IMPORTANT: Make sure your update actually sends these columns.
-    // If your `updateJob` hook whitelists fields and strips extras, call Supabase directly:
-    const { error: updError } = await supabase
-      .from('jobs')
-      .update(jobUpdates)
-      .eq('id', job.id);
-
-    if (updError) throw updError;
-
-    // Update service items if they changed (unchanged)
-    if (formData.serviceItems.length > 0) {
-      await supabase.from('job_service_items').delete().eq('job_id', job.id);
-
-      const serviceItemsData = formData.serviceItems.map((item, index) => ({
-        job_id: job.id,
-        business_id: profile.business_id,
-        item_name: item.itemName.trim(),
-        quantity: item.quantity,
-        unit_cost: item.unitCost,
-        unit_price: item.unitPrice,
-        description: item.description.trim() || null,
-        sort_order: index
-      }));
-
-      const { error: serviceItemsError } = await supabase.from('job_service_items').insert(serviceItemsData);
-      if (serviceItemsError) throw serviceItemsError;
-    }
-
-    console.log('🟢 Job updated successfully (recurrence generator will run if is_recurring=true)');
-    setHasUnsavedChanges(false);
-    navigate('/jobs');
-
-  } catch (error: any) {
-    console.error('🔴 Error updating job:', error);
-    setError(error.message || 'Failed to update job. Please try again.');
-  } finally {
-    setSaving(false);
-  }
-};
+  };
 
   const handleBackClick = () => {
     if (hasUnsavedChanges) {
@@ -503,10 +514,7 @@ const handleSave = async () => {
   const handleDiscardChanges = () => {
     setHasUnsavedChanges(false);
     setShowUnsavedWarning(false);
-    
-    if (pendingNavigation === 'back') {
-      navigate('/jobs');
-    }
+    if (pendingNavigation === 'back') navigate('/jobs');
     setPendingNavigation(null);
   };
 
@@ -651,7 +659,12 @@ const handleSave = async () => {
                     </label>
                     <select
                       value={formData.priority}
-                      onChange={(e) => handleInputChange('priority', e.target.value as 'low' | 'medium' | 'high')}
+                      onChange={(e) =>
+                        handleInputChange(
+                          'priority',
+                          e.target.value as 'low' | 'medium' | 'high'
+                        )
+                      }
                       className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-forest focus:border-transparent font-inter"
                     >
                       <option value="low">Low Priority</option>
@@ -669,7 +682,12 @@ const handleSave = async () => {
                       min="0"
                       step="0.5"
                       value={formData.estimatedDuration}
-                      onChange={(e) => handleInputChange('estimatedDuration', parseFloat(e.target.value) || 0)}
+                      onChange={(e) =>
+                        handleInputChange(
+                          'estimatedDuration',
+                          parseFloat(e.target.value) || 0
+                        )
+                      }
                       className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-forest focus:border-transparent font-inter"
                       placeholder="0"
                     />
@@ -688,15 +706,20 @@ const handleSave = async () => {
               <div className="space-y-4">
                 <div className="bg-gray-50 rounded-lg p-4">
                   <h3 className="font-inter font-semibold text-dark-slate mb-2">
-                    {job.clients?.business_name || 
-                     `${job.clients?.first_name || ''} ${job.clients?.last_name || ''}`.trim() ||
-                     'Unknown Client'}
+                    {job.clients?.business_name ||
+                      `${job.clients?.first_name || ''} ${
+                        job.clients?.last_name || ''
+                      }`.trim() ||
+                      'Unknown Client'}
                   </h3>
                   <p className="text-sm text-gray-600">
-                    {job.clients?.street_address}, {job.clients?.city}, {job.clients?.state} {job.clients?.zip_code}
+                    {job.clients?.street_address}, {job.clients?.city},{' '}
+                    {job.clients?.state} {job.clients?.zip_code}
                   </p>
                   {job.clients?.phone_number && (
-                    <p className="text-sm text-gray-600 mt-1">{job.clients.phone_number}</p>
+                    <p className="text-sm text-gray-600 mt-1">
+                      {job.clients.phone_number}
+                    </p>
                   )}
                 </div>
                 <p className="text-xs text-gray-500 font-inter">
@@ -707,10 +730,7 @@ const handleSave = async () => {
           </div>
 
           {/* Scheduling Section */}
-          <SchedulingSection
-            formData={formData}
-            onChange={handleSchedulingChange}
-          />
+          <SchedulingSection formData={formData} onChange={handleSchedulingChange} />
 
           {/* Service Items Section */}
           <ServiceItemsSection
@@ -734,9 +754,7 @@ const handleSave = async () => {
                 <p className="text-red-600 text-sm font-inter font-medium">
                   Please fix the following errors:
                 </p>
-                <p className="text-red-600 text-sm font-inter mt-1">
-                  {error}
-                </p>
+                <p className="text-red-600 text-sm font-inter mt-1">{error}</p>
               </div>
             </div>
           )}
